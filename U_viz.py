@@ -1,12 +1,9 @@
-#Made on Feb 28 2025
-#Base code with the help of chatgpt and preplexity
-# But I ahd to go through it to fix some issues and add some features
 import numpy as np
 import matplotlib.pyplot as plt
 #from mpl_toolkits.mplot3d import Axes3D
 from itertools import combinations
 
-def visualize_molecule(atoms, coordinates, filename=-1):
+def UV(atoms, coordinates, filename=-1):
     """
     Visualizes a 3D molecular structure using Matplotlib.
 
@@ -20,13 +17,14 @@ def visualize_molecule(atoms, coordinates, filename=-1):
 
     # Bond properties
     bond_thresholds = {
-        ('C', 'H'): 1.09, ('C', 'C'): 1.54, ('C', 'O'): 1.43, ('C', 'N'): 1.47, ('C', 'F'): 1.35, ('C', 'Cl'): 1.76, ('C', 'S'): 1.82,
+        ('C', 'H'): 1.15, ('C', 'C'): 1.54, ('C', 'O'): 1.43, ('C', 'N'): 1.47, ('C', 'F'): 1.35, ('C', 'Cl'): 1.76, ('C', 'S'): 1.82,
         ('O', 'H'): 0.96, ('N', 'H'): 1.01, ('S', 'H'): 1.34, ('P', 'H'): 1.44, ('P', 'P'): 2.21, ('S', 'S'): 2.05,
         ('Cl', 'Cl'): 1.99, ('I', 'I'): 2.67,
         ('C', 'C'): 1.34, ('C', 'O'): 1.21, ('C', 'N'): 1.28, ('N', 'N'): 1.24, ('O', 'P'): 1.48,
-        ('C', 'C'): 1.20, ('C', 'N'): 1.16, ('N', 'N'): 1.10
+        ('C', 'C'): 1.20, ('C', 'N'): 1.16, ('N', 'N'): 1.10, ('O', 'O'): 1.21, ('H','H'): 0.74, 
+        ('N','O'): 1.28
     }
-    buffer = 0.1  # Buffer region for bond formation
+    buffer = 0.12  # Buffer region for bond formation
 
     #max_bonds = {'C': 4, 'O': 2, 'H': 1, 'S': 6, 'F': 1, 'Cl': 1, 'I': 1, 'P': 5, 'N': 3}
 
@@ -47,10 +45,13 @@ def visualize_molecule(atoms, coordinates, filename=-1):
     for i, j in combinations(range(num_atoms), 2):
         atom_pair = tuple(sorted((atoms[i], atoms[j])))
         dist = np.linalg.norm(coordinates[i] - coordinates[j])
-        
-        if atom_pair in bond_thresholds:
+        if atom_pair[::-1] in bond_thresholds:
+            atom_pair = atom_pair[::-1]
+        elif not(atom_pair in bond_thresholds):
+            #print("Pair found")
+            print("Pair  not found:",atom_pair)
+        if (atom_pair in bond_thresholds ):
             threshold = bond_thresholds[atom_pair]
-            
             if dist <= threshold + buffer:
                 bonded_atoms[i].append(j)
                 bonded_atoms[j].append(i)
@@ -87,6 +88,6 @@ def visualize_molecule(atoms, coordinates, filename=-1):
     ax.set_title('3D Molecular Structure')
     
     # Custom legend with uniform marker size
-    handles = [plt.Line2D([0.0], [-0.0], marker='o', color='w', markerfacecolor=atom_colors[atom], markersize=8, label=atom) for atom in set(atoms)]
-    ax.legend(handles=handles, loc='upper right')
+    #handles = [plt.Line2D([0.0], [-0.0], marker='o', color='w', markerfacecolor=atom_colors[atom], markersize=8, label=atom) for atom in set(atoms)]
+    #ax.legend(handles=handles, loc='upper right')
     return ax, plt
