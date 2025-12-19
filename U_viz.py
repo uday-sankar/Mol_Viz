@@ -53,10 +53,20 @@ class MoleculeVisualizer:
         """Convert coordinates to XYZ format string."""
         if atoms is None:
             atoms = self.atoms
-        coords = coords.reshape(-1, 3)
+        Num_atoms = len(atoms)
+        try:
+            coords_xyz = coords.reshape(Num_atoms, 3)
+        except:
+            if self.int_to_cart !=-1:
+                coords_xyz = coords.flatten()
+                coords_xyz = self.int_to_cart(coords)
+            else:
+                print("!!! Issue with coordinates supplied !!!\n !!! Can't respahe to Nx3 and no internal to cartesian conversion supplied\n")
+                exit()
+
         
         xyz_string = f"{len(atoms)}\n{comment}\n"
-        for atom, coord in zip(atoms, coords):
+        for atom, coord in zip(atoms, coords_xyz):
             xyz_string += f"{atom} {coord[0]:.6f} {coord[1]:.6f} {coord[2]:.6f}\n"
         return xyz_string
 
@@ -116,24 +126,35 @@ class MoleculeVisualizer:
         """
         if coords is None:
             coords = self.coords
+        
+        Num_atoms = len(self.atoms)
+        try:
+            coords_xyz = coords.reshape(Num_atoms, 3)
+        except:
+            if self.int_to_cart !=-1:
+                coords_xyz = coords.flatten()
+                coords_xyz = self.int_to_cart(coords)
+            else:
+                print("!!! Issue with coordinates supplied !!!\n !!! Can't respahe to Nx3 and no internal to cartesian conversion supplied\n")
+                exit()
         if ax == -1:
             fig = plt.figure(figsize=(5, 5))
             ax = fig.add_subplot(111, projection="3d")
 
         # Scatter atoms
-        for atom, coord in zip(self.atoms, coords):
+        for atom, coord in zip(self.atoms, coords_xyz):
             ax.scatter(*coord,
                        color=self.atom_colors[atom],
                        s=self.atom_sizes[atom],
                        edgecolors="k")
 
         # Bonds
-        bonds = self._get_bonds(coords)
+        bonds = self._get_bonds(coords_xyz)
         for i in bonds.keys():
             for j in bonds[i]:
-                ax.plot([coords[i, 0], coords[j, 0]],
-                        [coords[i, 1], coords[j, 1]],
-                        [coords[i, 2], coords[j, 2]],
+                ax.plot([coords_xyz[i, 0], coords_xyz[j, 0]],
+                        [coords_xyz[i, 1], coords_xyz[j, 1]],
+                        [coords_xyz[i, 2], coords_xyz[j, 2]],
                         color="black", linewidth=2)
 
         # Labels
