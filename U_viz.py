@@ -23,16 +23,26 @@ class MoleculeVisualizer:
         'Cr': 800, 'X': 400
     }
 
-    def __init__(self, atoms, coords, int_to_cart=-1, cart_to_int=-1):
+    def __init__(self, atoms, coords, int_to_cart=None, cart_to_int=None):
         self.atoms = np.array(atoms)
         self.coords = np.array(coords)
         self.int_to_cart = int_to_cart
         self.cart_to_int = cart_to_int
-        if int_to_cart == -1:
+        shape = coords.shape
+        if len(shape) > 1:
+            if shape[1] == 3:
+                print("Cartesian Coordinates Deteceted")
+                self.coord_type = "Cartesian"
+            else:
+                self.coord_type = "N/A"
+        else:
+            print(" Flattened internal Coordinates Deteceted ")
+            self.coord_type = "Internal"
+        if int_to_cart == None:
             print("No conversion between internal to cartesian")
         else:
             print("Internal to cartesian transformation provided")
-        if cart_to_int == -1:
+        if cart_to_int == None:
             print("No conversion between cartesian to internal")
         else:
             print("Cartesian to internal transformation provided")
@@ -170,7 +180,7 @@ class MoleculeVisualizer:
         return ax, plt
 
     def animate_normal_mode(self, mode_vector, scale=0.2, n_frames=30,
-                            interval=100, save_file="normal_mode.gif"):
+                            interval=100, save_file="normal_mode.gif",title="Normal Mode Animation"):
         """
         Animate a normal mode vibration using matplotlib.
         """
@@ -198,7 +208,7 @@ class MoleculeVisualizer:
         ax.set_xlim(scaling.min() - 1, scaling.max() + 1)
         ax.set_ylim(scaling.min() - 1, scaling.max() + 1)
         ax.set_zlim(scaling.min() - 1, scaling.max() + 1)
-        ax.set_title("Normal Mode Animation")
+        ax.set_title(title)
 
         def update(frame_idx):
             frame_coords = displacements[frame_idx]
@@ -359,9 +369,8 @@ class MoleculeVisualizer:
 
     def animate_mode_internal(
         self,
-        q0_int,
         mode_vector_int,
-        atoms,
+        q0_int = None,
         filename="mode_animation",
         n_frames=30,
         amplitude=0.1,
@@ -370,12 +379,17 @@ class MoleculeVisualizer:
         """
         Animate a normal mode in internal coordinates and save as .xyz or .molden file.
         """
+        atoms = self.atoms
+        if q0_int == None:
+            q0_int = self.coords
+        ##
         int_to_cart = self.int_to_cart
-        cart_to_int = self.cart_to_int
+        #cart_to_int = self.cart_to_int
+        if int_to_cart == None:
+            print("Animation not possible without internal to cartesian conversion function")
         assert filetype.lower() in ["xyz", "molden"], "Filetype must be 'xyz' or 'molden'"
         mode_norm = mode_vector_int / np.linalg.norm(mode_vector_int)
         frames = []
-
         print(f"Generating {n_frames} frames for normal mode animation in internal coordinates...")
         print(f"Amplitude: {amplitude:.4f}, File type: {filetype}")
 
@@ -384,6 +398,66 @@ class MoleculeVisualizer:
             q_disp = q0_int + amplitude * np.sin(phase) * mode_norm
             R_cart = int_to_cart(q_disp)
             frames.append(R_cart)
+            print(f"Frame {i + 1:3d}/{n_frames}: displacement phase = {phase:.3f} rad")
+
+        if filetype.lower() == "xyz":
+            outfile = f"{filename}.xyz"
+            with open(outfile, "w") as f:
+                for R in frames:
+                    f.write(f"{len(atoms)}\n\n")
+                    for sym, (x, y, z) in zip(atoms, R):
+                        f.write(f"{sym:2s} {x:15.8f} {y:15.8f} {z:15.8f}\n")
+            print(f"XYZ animation saved to {outfile}")
+
+        elif filetype.lower() == "molden":
+            outfile = f"{filename}.molden"
+            with open(outfile, "w") as f:
+                f.write("[Molden Format]\n[GEOMETRIES] XYZ\n")
+                for idx, R in enumerate(frames):
+                    f.write(f"Geom_{idx+1}\n")
+                    for sym, (x, y, z) in zip(atoms, R):
+                        f.write(f"{sym:2s} {x:15.8f} {y:15.8f} {z:15.8f}\n")
+            print(f"MOLDEN animation saved to {outfile}")
+
+        print("Normal mode animation generation complete.\n")
+
+    def save_normal_mode_xyz(
+        self,
+        mode_vector,
+        coords = None,
+        filename="mode_animation",
+        n_frames=30,
+        amplitude=0.1,
+        filetype="xyz"
+    ):
+        """
+        save the animation file for a normal mode motion in xyz
+        """
+        atoms = self.atoms
+        int_to_cart = self.int_to_cart
+        ##
+        if coords == None:
+            coords = self.coords
+            if self.coord_type != "Cartesian":
+                if int_to_cart == None:
+                    print("Animation not possible. No method to cob=nvert from internal to cartesian")
+                else:
+                    coords = int_to_cart(coords)
+        xyz_shape = coords.shape
+        #cart_to_int = self.cart_to_int
+        if int_to_cart == None:
+            print("Animation not possible without internal to cartesian conversion function")
+        assert filetype.lower() in ["xyz", "molden"], "Filetype must be 'xyz' or 'molden'"
+        mode_norm = mode_vector.flatten() / np.linalg.norm(mode_vector.flatten())
+        frames = []
+        print(f"Generating {n_frames} frames for normal mode animation in internal coordinates...")
+        print(f"Amplitude: {amplitude:.4f}, File type: {filetype}")
+
+        for i in range(n_frames):
+            phase = 2 * np.pi * i / n_frames
+            dxyz_flat = coords.flatten() + amplitude * np.sin(phase) * mode_norm
+            #R_cart = int_to_cart(q_disp)
+            frames.append(dxyz_flat.reshape(xyz_shape))
             print(f"Frame {i + 1:3d}/{n_frames}: displacement phase = {phase:.3f} rad")
 
         if filetype.lower() == "xyz":
