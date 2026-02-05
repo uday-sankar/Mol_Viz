@@ -24,6 +24,18 @@ class MoleculeVisualizer:
     }
 
     def __init__(self, atoms, coords, int_to_cart=None, cart_to_int=None):
+        """
+        Docstring for __init__
+        Necessary Params:
+            * self: molcular vizualization code
+            * atoms: an list of all the atom symbols. eg ["H", "H"] for H$_2$
+            * coords: a numpy array of coordinates (Cartesian or internal)
+        Optional params:
+            * int_to_cart: Internal to cartesian coordinate conversion function
+            * cart_to_int: Cartesian to internal conversion function
+            Both these functions should work nested. 
+            We should be able to write: int_to_cart(cart_to_int(int_to_cart))
+        """
         self.atoms = np.array(atoms)
         self.coords = np.array(coords)
         self.int_to_cart = int_to_cart
@@ -46,6 +58,9 @@ class MoleculeVisualizer:
             print("No conversion between cartesian to internal")
         else:
             print("Cartesian to internal transformation provided")
+        if (int_to_cart !=None and cart_to_int != None):
+            self.Consistancy_check( coords, tol=1e-4)
+
 
     def _get_bonds(self, coords=None):
         """Compute bonds using chemcoord."""
@@ -424,11 +439,13 @@ class MoleculeVisualizer:
     def save_normal_mode_xyz(
         self,
         mode_vector,
+        mode_egval = None,
         coords = None,
         filename="mode_animation",
         n_frames=30,
         amplitude=0.1,
-        filetype="xyz"
+        filetype="xyz",
+        verbose = 0
     ):
         """
         save the animation file for a normal mode motion in xyz
@@ -440,7 +457,7 @@ class MoleculeVisualizer:
             coords = self.coords
             if self.coord_type != "Cartesian":
                 if int_to_cart == None:
-                    print("Animation not possible. No method to cob=nvert from internal to cartesian")
+                    print("Animation not possible. No method to convert from internal to cartesian")
                 else:
                     coords = int_to_cart(coords)
         xyz_shape = coords.shape
@@ -450,15 +467,17 @@ class MoleculeVisualizer:
         assert filetype.lower() in ["xyz", "molden"], "Filetype must be 'xyz' or 'molden'"
         mode_norm = mode_vector.flatten() / np.linalg.norm(mode_vector.flatten())
         frames = []
-        print(f"Generating {n_frames} frames for normal mode animation in internal coordinates...")
-        print(f"Amplitude: {amplitude:.4f}, File type: {filetype}")
+        if verbose > 0:
+            print(f"Generating {n_frames} frames for normal mode animation in internal coordinates...")
+            print(f"Amplitude: {amplitude:.4f}, File type: {filetype}")
 
         for i in range(n_frames):
             phase = 2 * np.pi * i / n_frames
             dxyz_flat = coords.flatten() + amplitude * np.sin(phase) * mode_norm
             #R_cart = int_to_cart(q_disp)
             frames.append(dxyz_flat.reshape(xyz_shape))
-            print(f"Frame {i + 1:3d}/{n_frames}: displacement phase = {phase:.3f} rad")
+            if verbose > 0:
+                print(f"Frame {i + 1:3d}/{n_frames}: displacement phase = {phase:.3f} rad")
 
         if filetype.lower() == "xyz":
             outfile = f"{filename}.xyz"
@@ -467,7 +486,8 @@ class MoleculeVisualizer:
                     f.write(f"{len(atoms)}\n\n")
                     for sym, (x, y, z) in zip(atoms, R):
                         f.write(f"{sym:2s} {x:15.8f} {y:15.8f} {z:15.8f}\n")
-            print(f"XYZ animation saved to {outfile}")
+                if mode_egval != None:
+                    f.write(f"Eigen Value of Mode: {mode_egval}")
 
         elif filetype.lower() == "molden":
             outfile = f"{filename}.molden"
@@ -477,6 +497,96 @@ class MoleculeVisualizer:
                     f.write(f"Geom_{idx+1}\n")
                     for sym, (x, y, z) in zip(atoms, R):
                         f.write(f"{sym:2s} {x:15.8f} {y:15.8f} {z:15.8f}\n")
-            print(f"MOLDEN animation saved to {outfile}")
+                if mode_egval != None:
+                    f.write(f"\nEigen Value of Mode: {mode_egval}")
 
-        print("Normal mode animation generation complete.\n")
+        print(f"Normal mode animation generation complete. File saved as {outfile}")
+
+    def read_xyz_Traj(self, filename):
+        """
+        Reads an XYZ trajectory file and returns a list of frames.
+        Each frame is a list of lines (strings).
+        """
+        frames = []
+        with open(filename, 'r') as f:
+            while True:
+                # Read atom count line
+                n_atoms = f.readline()
+                if not n_atoms:
+                    break  # end of file
+
+                comment = f.readline()  # energy/frame line
+                frame = [n_atoms, comment]
+
+                # Read the next N atom lines
+                for _ in range(int(n_atoms.strip())):
+                    frame.append(f.readline())
+
+                frames.append(frame)
+
+        return frames
+    
+    def Consistancy_check(self, test_geom,tol=1e-4):
+        # All functions should work with numpy matrix/array. test_geom has to be numpy array or matrix
+        # Interanal coordinates should be flattened arrays, cartesian coordinates should ne Nx3 matrix
+        cart_to_int = self.cart_to_int
+        int_to_cart = self.int_to_cart
+        ##
+        N = np.linalg.norm
+        single_tr = False
+        double_tr = False
+        geom_shape = test_geom.shape
+        if len(geom_shape) > 1:
+            if geom_shape[1] == 3:
+                print("_________ Input geometry Cartesian _________\n\t Attempting Single transformration (Cart) \n\t Cart0 -> Int0 -> Cartn; |Cartn - Cart0|")
+                g0 = np.copy(test_geom)
+                int0 = cart_to_int(g0)
+                g0_back = int_to_cart(int0)
+                dG = N(g0_back - g0)
+                if  dG <= tol:
+                    print("\tSingle Transformation Check Sucessfull (dG<tol).\n\t |dG| =",dG,"\n\t _____________________")
+                    single_tr = True
+                else:
+                    print("!!!!!!!!! Single Transformation not withing tolerance !!!!!!!!!\n\t |dG| =",dG,"\n\t _____________________")
+                    single_tr =  False
+                print("\t Attempting Double Transformation (Internal)\n\t Int0 -> Cartn -> Intn; |int0 - Intn| ")
+                int0_back = cart_to_int(g0_back)
+                dG_back = N(int0_back - int0)
+                if  dG_back <= tol:
+                    print("\tDouble Transformation Sucessfull. \n\t No issues in coordinate transformation back and forth\n\t|dG| =",dG_back)
+                    double_tr =  True
+                else:
+                    print("!!!!!!!!! Double Transformation not withing tolerance !!!!!!!!!\n |dG| =",dG_back,"\n _______________________________")
+                    double_tr = False
+            else:
+                print("!!!!!!!!! Unknown Geometry Input !!!!!!!!!")
+                double_tr,  single_tr =  False, False
+        elif len(geom_shape)  == 1:
+            print("_________ Input geometry Internal _________\n\t Attempting Single transformration (Int) \n\t Int0 -> Cart0 -> Intn; |Intn - Int0|")
+            int0 = np.copy(test_geom) 
+            g0 = int_to_cart(int0)
+            int0_back = cart_to_int(g0)
+            dG = N(int0_back - int0)
+            if  dG <= tol:
+                print("\t Single Transformation Check  Sucessfull. \n\t No issues in coordinate transformation back and forth\n\t |dG| =",dG,"\n\t _____________________")
+                single_tr =  True
+            else:
+                print("!!!!!!!!! Transformation not withing tolerance !!!!!!!!!\n |dG| =",dG,"\n\t _____________________")
+                single_tr =  False
+            print("\tAttempting Double Transformation (Internal)\n\t Cart0 -> Intn -> Cartn; |Cart0 - Cartn| ")
+            g0_back = int_to_cart(int0_back)
+            dG_back =  N(g0_back-g0)
+            if  dG_back <= tol:
+                print("\tDouble Transformation Sucessfull. \n\t No issues in coordinate transformation back and forth\n\t |dG| =",dG_back)
+                double_tr =  True
+            else:
+                print("!!!!!!!!! Double Transformation not withing tolerance !!!!!!!!!\n |dG| =",dG_back,"\n _______________________________")
+                double_tr = False
+        else:
+            print(" !!!!! Unknown Geometry Input !!!!!!!")
+            double_tr,  single_tr =  False, False
+        if (single_tr == True and double_tr == True):
+            print("Both Single and Double Transformations Sucess")
+        elif (single_tr == False and double_tr == True):
+            print("Single transformation failure starting from a cartesian geometry is expected.\nThis happens because the internal coordinates loose translational and rotational information.\nThe true consistance can be checked by Calling the function using an internal coordinate,\nwhich will give both transfermations correctly only if the conversions are true. ")    
+        return single_tr, double_tr
