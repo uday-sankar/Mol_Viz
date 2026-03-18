@@ -590,3 +590,324 @@ class MoleculeVisualizer:
         elif (single_tr == False and double_tr == True):
             print("Single transformation failure starting from a cartesian geometry is expected.\nThis happens because the internal coordinates loose translational and rotational information.\nThe true consistance can be checked by Calling the function using an internal coordinate,\nwhich will give both transfermations correctly only if the conversions are true. ")    
         return single_tr, double_tr
+
+    def minimize_FIRE(
+        self,
+        potential_and_forces,
+        coords=None,
+        use_internal=False,
+        # FIRE 2.0 hyperparameters
+        dt_start=0.1,
+        dt_max=1.0,
+        dt_min=None,
+        N_min=5,
+        f_inc=1.1,
+        f_dec=0.5,
+        alpha_start=0.1,
+        f_alpha=0.99,
+        # Convergence / run control
+        max_steps=2000,
+        fmax=1e-4,
+        fmax_internal=None,
+        energy_tol=None,
+        # Logging / output
+        verbose=1,
+        log_every=50,
+        save_traj=False,
+        traj_filename="FIRE_traj.xyz",
+    ):
+        """
+        FIRE 2.0 geometry minimisation with velocity-Verlet steps.
+
+        The external callable ``potential_and_forces`` fully defines the PES.
+        This method handles *only* the optimiser logic: no force-field
+        assumptions are hard-coded.
+
+        Parameters
+        ----------
+        potential_and_forces : callable
+            Signature: ``energy, forces = potential_and_forces(coords)``
+            where *coords* has the same shape as the coordinate array that is
+            being optimised (Nx3 Cartesian or 1-D internal, depending on
+            ``use_internal``).  *forces* must have the same shape as *coords*.
+
+        coords : np.ndarray, optional
+            Starting geometry.  If *None*, ``self.coords`` is used.
+            Shape must match the convention set by ``use_internal``.
+
+        use_internal : bool, default False
+            If *True* the optimisation runs in internal coordinates.
+            ``self.int_to_cart`` must be provided (for trajectory saving and
+            convergence in Cartesian force norm if ``fmax_internal`` is None).
+
+        dt_start : float, default 0.1
+            Initial time step.
+
+        dt_max : float, default 1.0
+            Maximum allowed time step.
+
+        dt_min : float or None, default None
+            Minimum allowed time step (FIRE 2.0 lower-bound).
+            If *None*, set to ``dt_start / 10``.
+
+        N_min : int, default 5
+            Number of consecutive positive-power steps before dt is allowed
+            to increase (FIRE 2.0 parameter).
+
+        f_inc : float, default 1.1
+            Factor by which dt is multiplied when power is positive.
+
+        f_dec : float, default 0.5
+            Factor by which dt is multiplied when power is negative (reset).
+
+        alpha_start : float, default 0.1
+            Initial mixing parameter alpha.
+
+        f_alpha : float, default 0.99
+            Factor by which alpha is multiplied when power is positive.
+
+        max_steps : int, default 2000
+            Hard limit on the number of steps.
+
+        fmax : float, default 1e-4
+            Convergence threshold on the maximum atomic force component
+            (Cartesian, same units as the forces returned by
+            ``potential_and_forces``).
+
+        fmax_internal : float or None
+            If provided, convergence is judged by the max force component in
+            *internal* coordinate space instead of Cartesian.  Ignored when
+            ``use_internal`` is False.
+
+        energy_tol : float or None
+            If provided, also require |ΔE| < energy_tol between consecutive
+            steps for convergence.
+
+        verbose : int, default 1
+            0 → silent, 1 → concise log, 2 → detailed per-step log.
+
+        log_every : int, default 50
+            Print a summary line every this many steps (when verbose >= 1).
+
+        save_traj : bool, default False
+            If *True*, write an XYZ trajectory of the optimisation.
+
+        traj_filename : str, default "FIRE_traj.xyz"
+            File name for the trajectory (only used when ``save_traj=True``).
+
+        Returns
+        -------
+        result : dict
+            Keys:
+            ``"coords"``       – optimised coordinate array (same shape as input)
+            ``"energy"``       – final potential energy (scalar)
+            ``"forces"``       – final force array
+            ``"converged"``    – bool
+            ``"n_steps"``      – number of steps taken
+            ``"energies"``     – list of energy at every step
+            ``"fmax_history"`` – list of max-force at every step
+            ``"dt_history"``   – list of dt at every step
+        """
+        # ------------------------------------------------------------------ #
+        #  0.  Setup                                                          #
+        # ------------------------------------------------------------------ #
+        if coords is None:
+            coords = np.copy(self.coords)
+        else:
+            coords = np.array(coords, dtype=float)
+
+        if dt_min is None:
+            dt_min = dt_start / 10.0
+
+        # ---- FIRE 2.0 state variables ------------------------------------ #
+        v    = np.zeros_like(coords)   # velocity
+        dt   = dt_start
+        alpha = alpha_start
+        n_pos = 0                      # consecutive steps with P > 0
+
+        converged  = False
+        energies   = []
+        fmax_hist  = []
+        dt_hist    = []
+
+        # ---- Trajectory file --------------------------------------------- #
+        traj_file = None
+        if save_traj:
+            traj_file = open(traj_filename, "w")
+            if verbose >= 1:
+                print(f"[FIRE] Trajectory will be written to '{traj_filename}'")
+
+        # ---- Initial evaluation ------------------------------------------ #
+        energy, forces = potential_and_forces(coords)
+        energy = float(energy)
+        forces = np.array(forces, dtype=float)
+
+        if verbose >= 1:
+            print("=" * 62)
+            print("  FIRE 2.0 Geometry Minimisation")
+            print("=" * 62)
+            print(f"  dt_start={dt_start}, dt_max={dt_max}, dt_min={dt_min:.2e}")
+            print(f"  N_min={N_min}, f_inc={f_inc}, f_dec={f_dec}")
+            print(f"  alpha_start={alpha_start}, f_alpha={f_alpha}")
+            print(f"  fmax_threshold={fmax}, max_steps={max_steps}")
+            print("-" * 62)
+            print(f"  {'Step':>6}  {'Energy':>16}  {'fmax':>12}  {'dt':>10}  {'alpha':>8}")
+            print("-" * 62)
+
+        # ------------------------------------------------------------------ #
+        #  1.  Helper: Cartesian force-norm for convergence check            #
+        # ------------------------------------------------------------------ #
+        def _fmax_cart(f, q=None):
+            """Max force component in Cartesian space."""
+            if use_internal and self.int_to_cart is not None and q is not None:
+                # Numerical Jacobian  J = dR/dq  → f_cart = (J^T)^{-1} f_int
+                # For a simple norm check we project via finite differences.
+                eps = 1e-5
+                q_flat = np.asarray(q).flatten()
+                n_int  = q_flat.size
+                R0     = self.int_to_cart(q_flat)
+                J      = np.zeros((R0.size, n_int))
+                for k in range(n_int):
+                    dq      = np.zeros(n_int)
+                    dq[k]   = eps
+                    R_plus  = self.int_to_cart(q_flat + dq).flatten()
+                    R_minus = self.int_to_cart(q_flat - dq).flatten()
+                    J[:, k] = (R_plus - R_minus) / (2 * eps)
+                # Cartesian forces  ≈  J  (J^T J)^{-1} f_int
+                # Use least-squares pseudo-inverse for rectangular J
+                f_flat = np.asarray(f).flatten()
+                f_cart = J @ np.linalg.lstsq(J.T @ J, f_flat, rcond=None)[0]
+                return np.max(np.abs(f_cart))
+            return np.max(np.abs(f))
+
+        def _fmax_for_convergence(f, q):
+            if use_internal and fmax_internal is not None:
+                return np.max(np.abs(f)), fmax_internal
+            return _fmax_cart(f, q), fmax
+
+        # ------------------------------------------------------------------ #
+        #  2.  Helper: write one frame to trajectory                         #
+        # ------------------------------------------------------------------ #
+        def _write_traj_frame(step, q, eng):
+            if traj_file is None:
+                return
+            if use_internal and self.int_to_cart is not None:
+                R = self.int_to_cart(q)
+            else:
+                R = q.reshape(-1, 3)
+            traj_file.write(f"{len(self.atoms)}\n")
+            traj_file.write(f"Step {step}, Energy = {eng:.8f}\n")
+            for sym, (x, y, z) in zip(self.atoms, R):
+                traj_file.write(f"{sym:2s} {x:15.8f} {y:15.8f} {z:15.8f}\n")
+
+        # ---- Log step 0 -------------------------------------------------- #
+        fm_val, fm_thresh = _fmax_for_convergence(forces, coords)
+        energies.append(energy)
+        fmax_hist.append(fm_val)
+        dt_hist.append(dt)
+        _write_traj_frame(0, coords, energy)
+        if verbose >= 1:
+            print(f"  {'0':>6}  {energy:>16.8f}  {fm_val:>12.4e}  {dt:>10.4f}  {alpha:>8.4f}")
+
+        # ------------------------------------------------------------------ #
+        #  3.  Main FIRE 2.0 loop                                            #
+        # ------------------------------------------------------------------ #
+        prev_energy = energy
+
+        for step in range(1, max_steps + 1):
+
+            ## ---- 3a. Velocity Verlet — first half-kick ------------------- #
+            #v = v + 0.5 * dt * forces
+
+            # ---- 3b. Update positions ------------------------------------ #
+            dq = dt * v + 0.5 * forces * dt**2.0
+            coords = coords + dq
+            # ---- 3c. New forces ------------------------------------------ #
+            energy, forces_new = potential_and_forces(coords)
+            energy = float(energy)
+            forces_new = np.array(forces_new, dtype=float)
+
+            # ---- 3d. Velocity Verlet — second half-kick ------------------ #
+            v = v + 0.5 * (forces+forces_new) * dt
+            ##
+            forces = forces_new.copy()
+            #force_step = forces.copy()
+            #v_step = v.copy()# for use for back stepping
+            # ---- 3e. FIRE 2.0 velocity mixing ---------------------------- #
+            F_norm = np.linalg.norm(forces)
+            v_norm = np.linalg.norm(v)
+
+            # Mixing: v ← (1-α) v + α |v| f̂
+            if F_norm > 0.0:
+                v = (1.0 - alpha) * v + alpha * (v_norm / F_norm) * forces
+
+            # Power P = F · v
+            P = float(np.dot(forces.flatten(), v.flatten()))
+
+            # ---- 3f. FIRE 2.0 adaptive step-size / alpha update --------- #
+            if P > 0.0:
+                n_pos += 1
+                if n_pos >= N_min:
+                    dt    = min(dt * f_inc, dt_max)
+                    alpha = alpha * f_alpha
+                    #if alpha < 0.5:
+                    #    alpha = 0.5
+            else:
+                # Negative power: reset
+                n_pos  = 0
+                coords = coords - dq*0.5 #(dt * v_step - 0.5*force_step*dt**2.0)
+                dt     = max(dt * f_dec, dt_min)
+                alpha  = alpha_start
+                v      = np.zeros_like(v)   # zero velocity on reset (FIRE 2.0)
+               
+
+            # ---- 3g. Logging & history ----------------------------------- #
+            fm_val, fm_thresh = _fmax_for_convergence(forces, coords)
+            delta_E = abs(energy - prev_energy)
+            energies.append(energy)
+            fmax_hist.append(fm_val)
+            dt_hist.append(dt)
+            _write_traj_frame(step, coords, energy)
+
+            if verbose == 2 or (verbose == 1 and step % log_every == 0):
+                print(f"  {step:>6}  {energy:>16.8f}  {fm_val:>12.4e}  {dt:>10.4f}  {alpha:>8.4f}")
+
+            # ---- 3h. Convergence check ----------------------------------- #
+            force_ok  = fm_val <= fm_thresh
+            energy_ok = (energy_tol is None) or (delta_E <= energy_tol)
+
+            if force_ok and energy_ok:
+                converged = True
+                if verbose >= 1:
+                    print(f"  {step:>6}  {energy:>16.8f}  {fm_val:>12.4e}  {dt:>10.4f}  {alpha:>8.4f}")
+                break
+
+            prev_energy = energy
+
+        # ------------------------------------------------------------------ #
+        #  4.  Wrap-up                                                       #
+        # ------------------------------------------------------------------ #
+        if traj_file is not None:
+            traj_file.close()
+
+        if verbose >= 1:
+            print("-" * 62)
+            status = "CONVERGED ✓" if converged else "NOT CONVERGED ✗"
+            print(f"  [{status}]  steps={step}  energy={energy:.8f}  fmax={fm_val:.4e}")
+            if save_traj:
+                print(f"  Trajectory saved to '{traj_filename}'")
+            print("=" * 62)
+
+        # Update self.coords to the minimised geometry
+        self.coords = coords
+
+        return {
+            "coords":       coords,
+            "energy":       energy,
+            "forces":       forces,
+            "converged":    converged,
+            "n_steps":      step,
+            "energies":     energies,
+            "fmax_history": fmax_hist,
+            "dt_history":   dt_hist,
+        }
