@@ -23,6 +23,43 @@ class MoleculeVisualizer:
         'Cr': 800, 'X': 400
     }
 
+    atomic_masses = {
+                "H": 1.008,
+                "B": 10.81,
+                "C": 12.011,
+                "N": 14.007,
+                "O": 15.999,
+                "F": 18.998,
+                "P": 30.974,
+                "S": 32.06,
+                "Cl": 35.45,
+                "He": 4.0026,
+                "Li": 6.94,
+            }
+
+    Opt_params_DEFAULT = {
+        "use_internal": False,
+        # FIRE 2.0 hyperparameters
+        "dt_start": 0.1,
+        "dt_max": 1.0,
+        "dt_min": None,
+        "N_min": 5,
+        "f_inc": 1.1,
+        "f_dec": 0.5,
+        "alpha_start": 0.1,
+        "f_alpha": 0.99,
+        # Convergence / run control
+        "max_steps": 2000,
+        "fmax": 1e-4,
+        "fmax_internal": None,
+        "energy_tol": None,
+        # Logging / output
+        "verbose": 1,
+        "log_every": 50,
+        "save_traj": False,
+        "traj_filename": "FIRE_relax.xyz",
+        "NonRedudant_steps": False, # a tag to decide whether to use non redudant steps or not. Only valid for cartesian coordinates
+    }
     def __init__(self, atoms, coords, int_to_cart=None, cart_to_int=None):
         """
         Docstring for __init__
@@ -44,7 +81,7 @@ class MoleculeVisualizer:
         if len(shape) > 1:
             if shape[1] == 3:
                 print("Cartesian Coordinates Deteceted")
-                self.coord_type = "Cartesian"
+                self.coord_type = "XYZ"
             else:
                 self.coord_type = "N/A"
         else:
@@ -60,7 +97,10 @@ class MoleculeVisualizer:
             print("Cartesian to internal transformation provided")
         if (int_to_cart !=None and cart_to_int != None):
             self.Consistancy_check( coords, tol=1e-4)
-
+        ## Getting masses
+        self.mass  = [self.atomic_masses.get(a, 0) for a in atoms]
+        self.tot_mass = np.sum(self.mass)
+        self.N = len(atoms)
 
     def _get_bonds(self, coords=None):
         """Compute bonds using chemcoord."""
@@ -455,8 +495,8 @@ class MoleculeVisualizer:
         ##
         if coords == None:
             coords = self.coords
-            if self.coord_type != "Cartesian":
-                if int_to_cart == None:
+            if self.coord_type != "XYZ":
+                if int_to_cart is None:
                     print("Animation not possible. No method to convert from internal to cartesian")
                 else:
                     coords = int_to_cart(coords)
@@ -591,30 +631,84 @@ class MoleculeVisualizer:
             print("Single transformation failure starting from a cartesian geometry is expected.\nThis happens because the internal coordinates loose translational and rotational information.\nThe true consistance can be checked by Calling the function using an internal coordinate,\nwhich will give both transfermations correctly only if the conversions are true. ")    
         return single_tr, double_tr
 
+    def Get_B_mat(self,geom,dx=1e-4,verbose=False):
+        ##
+        N = self.N
+        test_geom = geom.flatten()
+        geom_len = len(test_geom)
+        if geom_len == 3.0*N:
+            if self.cart_to_int == None :
+                self.cart_to_int = self.get_zmatrix
+            if verbose:
+                print(" Cartesian Coordinates ")
+            int_0 = self.cart_to_int(test_geom)
+            int_size = len(int_0)
+            B = np.zeros((int_size,geom_len))
+            xyz_n = test_geom.copy()
+            xyz_p = test_geom.copy()
+            #print(xyz_n)
+            for i in range(geom_len):
+                # perturbing cart geom
+                xyz_n[i] = xyz_n[i] + dx
+                xyz_p[i] = xyz_p[i] - dx
+                # cart to interbnal conversion
+                int_n, int_p = self.cart_to_int(xyz_n), self.cart_to_int(xyz_p)
+                B[:,i] = (int_n - int_p)/(2.0*dx)
+                # setting cartesian geometry to original
+                xyz_n[i] = xyz_n[i] - dx
+                xyz_p[i] = xyz_p[i] + dx
+            return B
+        else: #Else tries the B-matrix concstruction for internal coordinates.
+            if self.int_to_cart == None:
+                print("B-matrix construction not possible without both cartesian to internal and internal to cartesian conversion functions")
+                return None
+            if verbose:
+                print("Internal Coordinates")
+            #int_0 = np.copy(test_geom)
+            xyz_0 = self.int_to_cart(test_geom)
+            ## Determining size of B matrix
+            int_size = geom_len
+            B = np.zeros((int_size,geom_len))
+            ##
+            xyz_n = xyz_0.flatten()
+            xyz_p = xyz_0.flatten()
+            #print(xyz_n)
+            for i in range(N*3):
+                # perturbing cart geom
+                xyz_n[i] = xyz_n[i] + dx
+                xyz_p[i] = xyz_p[i] - dx
+                # cart to interbnal conversion
+                int_n, int_p = self.cart_to_int(xyz_n), self.cart_to_int(xyz_p)
+                B[:,i] = (int_n - int_p)/(2*dx)
+                # setting cartesian geometry to original
+                xyz_n[i] = xyz_n[i] - dx
+                xyz_p[i] = xyz_p[i] + dx
+            return B
+
+    def Get_Non_redudant_Step(self,geom,dx):
+        if self.coord_type  == "XYZ":
+            B = self.Get_B_mat(geom)
+            G = B.T @ B  # Gamtrix
+            _, egvec = np.linalg.eigh(G)
+            ## Eigen vlues will be in ascending order. First 6 eigen values will be zero for non linear molecule and 5 for linear molecule. We need to retrive the motion along the rest of the eigen vectors which will be the non redudant motion
+            N = egvec.shape[0] # number of coordintes
+            ## retriving mostion along the largest 3N-6 eigen values
+            dx_non_red = np.zeros_like(dx)# non redudant cartesian displacement
+            for i in range(6,N):# retiving all 3N-6 modes
+                ev = egvec[:,i].copy()
+                dx_non_red += np.dot(ev,dx)*ev
+            dx_non_red_norm = np.linalg.norm(dx_non_red)
+            if  dx_non_red_norm > 1e-15:
+                dx_non_red = dx_non_red * np.linalg.norm(dx)/dx_non_red_norm # scaling the non redudant step to have the same norm as the projected original step
+            return dx_non_red
+        else:    
+            print("!!!!! Non-Redudnat Steps only valid for cartesian Coordinates !!!!! \n \tThis is not Cartesian Coordinate Turning Red_step OFF\n")
+ 
     def minimize_FIRE(
         self,
         potential_and_forces,
         coords=None,
-        use_internal=False,
-        # FIRE 2.0 hyperparameters
-        dt_start=0.1,
-        dt_max=1.0,
-        dt_min=None,
-        N_min=5,
-        f_inc=1.1,
-        f_dec=0.5,
-        alpha_start=0.1,
-        f_alpha=0.99,
-        # Convergence / run control
-        max_steps=2000,
-        fmax=1e-4,
-        fmax_internal=None,
-        energy_tol=None,
-        # Logging / output
-        verbose=1,
-        log_every=50,
-        save_traj=False,
-        traj_filename="FIRE_traj.xyz",
+        Opt_params=None
     ):
         """
         FIRE 2.0 geometry minimisation with velocity-Verlet steps.
@@ -711,18 +805,31 @@ class MoleculeVisualizer:
         # ------------------------------------------------------------------ #
         #  0.  Setup                                                          #
         # ------------------------------------------------------------------ #
+        Opt_params = Opt_params or {}
+        ## NEM Initlization parameters
+        final_cfg = {**self.Opt_params_DEFAULT, **Opt_params}
+        for key, value in final_cfg.items():
+            setattr(self, key, value)
+        
         if coords is None:
             coords = np.copy(self.coords)
         else:
             coords = np.array(coords, dtype=float)
 
-        if dt_min is None:
-            dt_min = dt_start / 10.0
+        if self.dt_min is None:
+            dt_min = self.dt_start / 10.0
 
         # ---- FIRE 2.0 state variables ------------------------------------ #
         v    = np.zeros_like(coords)   # velocity
-        dt   = dt_start
-        alpha = alpha_start
+        dt   = self.dt_start
+        alpha = self.alpha_start
+        N_min = self.N_min
+        f_inc = self.f_inc
+        f_dec = self.f_dec
+        f_alpha = self.f_alpha
+        dt_max = self.dt_max
+        dt_min = self.dt_min    
+        
         n_pos = 0                      # consecutive steps with P > 0
 
         converged  = False
@@ -732,24 +839,24 @@ class MoleculeVisualizer:
 
         # ---- Trajectory file --------------------------------------------- #
         traj_file = None
-        if save_traj:
-            traj_file = open(traj_filename, "w")
-            if verbose >= 1:
-                print(f"[FIRE] Trajectory will be written to '{traj_filename}'")
+        if self.save_traj:
+            traj_file = open(self.traj_filename, "w")
+            if self.verbose >= 1:
+                print(f"[FIRE] Trajectory will be written to '{self.traj_filename}'")
 
         # ---- Initial evaluation ------------------------------------------ #
         energy, forces = potential_and_forces(coords)
         energy = float(energy)
         forces = np.array(forces, dtype=float)
 
-        if verbose >= 1:
+        if self.verbose >= 1:
             print("=" * 62)
             print("  FIRE 2.0 Geometry Minimisation")
             print("=" * 62)
-            print(f"  dt_start={dt_start}, dt_max={dt_max}, dt_min={dt_min:.2e}")
+            print(f"  dt_start={self.dt_start}, dt_max={dt_max}, dt_min={dt_min:.2e}")
             print(f"  N_min={N_min}, f_inc={f_inc}, f_dec={f_dec}")
-            print(f"  alpha_start={alpha_start}, f_alpha={f_alpha}")
-            print(f"  fmax_threshold={fmax}, max_steps={max_steps}")
+            print(f"  alpha_start={alpha}, f_alpha={f_alpha}")
+            print(f"  fmax_threshold={self.fmax}, max_steps={self.max_steps}")
             print("-" * 62)
             print(f"  {'Step':>6}  {'Energy':>16}  {'fmax':>12}  {'dt':>10}  {'alpha':>8}")
             print("-" * 62)
@@ -759,7 +866,7 @@ class MoleculeVisualizer:
         # ------------------------------------------------------------------ #
         def _fmax_cart(f, q=None):
             """Max force component in Cartesian space."""
-            if use_internal and self.int_to_cart is not None and q is not None:
+            if self.use_internal and self.int_to_cart is not None and q is not None:
                 # Numerical Jacobian  J = dR/dq  → f_cart = (J^T)^{-1} f_int
                 # For a simple norm check we project via finite differences.
                 eps = 1e-5
@@ -781,9 +888,9 @@ class MoleculeVisualizer:
             return np.max(np.abs(f))
 
         def _fmax_for_convergence(f, q):
-            if use_internal and fmax_internal is not None:
-                return np.max(np.abs(f)), fmax_internal
-            return _fmax_cart(f, q), fmax
+            if self.use_internal and self.fmax_internal is not None:
+                return np.max(np.abs(f)), self.fmax_internal
+            return _fmax_cart(f, q), self.fmax
 
         # ------------------------------------------------------------------ #
         #  2.  Helper: write one frame to trajectory                         #
@@ -791,7 +898,7 @@ class MoleculeVisualizer:
         def _write_traj_frame(step, q, eng):
             if traj_file is None:
                 return
-            if use_internal and self.int_to_cart is not None:
+            if self.use_internal and self.int_to_cart is not None:
                 R = self.int_to_cart(q)
             else:
                 R = q.reshape(-1, 3)
@@ -806,7 +913,7 @@ class MoleculeVisualizer:
         fmax_hist.append(fm_val)
         dt_hist.append(dt)
         _write_traj_frame(0, coords, energy)
-        if verbose >= 1:
+        if self.verbose >= 1:
             print(f"  {'0':>6}  {energy:>16.8f}  {fm_val:>12.4e}  {dt:>10.4f}  {alpha:>8.4f}")
 
         # ------------------------------------------------------------------ #
@@ -814,13 +921,20 @@ class MoleculeVisualizer:
         # ------------------------------------------------------------------ #
         prev_energy = energy
 
-        for step in range(1, max_steps + 1):
+        for step in range(1, self.max_steps + 1):
 
             ## ---- 3a. Velocity Verlet — first half-kick ------------------- #
             #v = v + 0.5 * dt * forces
 
             # ---- 3b. Update positions ------------------------------------ #
-            dq = dt * v + 0.5 * forces * dt**2.0
+            if self.NonRedudant_steps == True and self.coord_type == "XYZ":
+                # Project the velocity and forces to non redudant space
+                v_non_red = self.Get_Non_redudant_Step(coords,v)
+                forces_non_red = self.Get_Non_redudant_Step(coords,forces)
+                # Update positions using non redudant velocity and forces
+                dq = dt * v_non_red + 0.5 * forces_non_red * dt**2.0
+            else:
+                dq = dt * v + 0.5 * forces * dt**2.0
             coords = coords + dq
             # ---- 3c. New forces ------------------------------------------ #
             energy, forces_new = potential_and_forces(coords)
@@ -828,7 +942,12 @@ class MoleculeVisualizer:
             forces_new = np.array(forces_new, dtype=float)
 
             # ---- 3d. Velocity Verlet — second half-kick ------------------ #
-            v = v + 0.5 * (forces+forces_new) * dt
+            if self.NonRedudant_steps == True and self.coord_type == "XYZ":
+                # Project the forces to non redudant space
+                forces_new_non_red = self.Get_Non_redudant_Step(coords,forces_new)
+                v = v + 0.5 * (forces_non_red+forces_new_non_red) * dt
+            else:
+                v = v + 0.5 * (forces+forces_new) * dt
             ##
             forces = forces_new.copy()
             #force_step = forces.copy()
@@ -857,7 +976,7 @@ class MoleculeVisualizer:
                 n_pos  = 0
                 coords = coords - dq*0.5 #(dt * v_step - 0.5*force_step*dt**2.0)
                 dt     = max(dt * f_dec, dt_min)
-                alpha  = alpha_start
+                alpha  = self.alpha_start
                 v      = np.zeros_like(v)   # zero velocity on reset (FIRE 2.0)
                
 
@@ -869,16 +988,16 @@ class MoleculeVisualizer:
             dt_hist.append(dt)
             _write_traj_frame(step, coords, energy)
 
-            if verbose == 2 or (verbose == 1 and step % log_every == 0):
+            if self.verbose == 2 or (self.verbose == 1 and step % self.log_every == 0):
                 print(f"  {step:>6}  {energy:>16.8f}  {fm_val:>12.4e}  {dt:>10.4f}  {alpha:>8.4f}")
 
             # ---- 3h. Convergence check ----------------------------------- #
             force_ok  = fm_val <= fm_thresh
-            energy_ok = (energy_tol is None) or (delta_E <= energy_tol)
+            energy_ok = (self.energy_tol is None) or (delta_E <= self.energy_tol)
 
             if force_ok and energy_ok:
                 converged = True
-                if verbose >= 1:
+                if self.verbose >= 1:
                     print(f"  {step:>6}  {energy:>16.8f}  {fm_val:>12.4e}  {dt:>10.4f}  {alpha:>8.4f}")
                 break
 
@@ -890,12 +1009,12 @@ class MoleculeVisualizer:
         if traj_file is not None:
             traj_file.close()
 
-        if verbose >= 1:
+        if self.verbose >= 1:
             print("-" * 62)
             status = "CONVERGED ✓" if converged else "NOT CONVERGED ✗"
             print(f"  [{status}]  steps={step}  energy={energy:.8f}  fmax={fm_val:.4e}")
-            if save_traj:
-                print(f"  Trajectory saved to '{traj_filename}'")
+            if self.save_traj:
+                print(f"  Trajectory saved to '{self.traj_filename}'")
             print("=" * 62)
 
         # Update self.coords to the minimised geometry
@@ -911,3 +1030,175 @@ class MoleculeVisualizer:
             "fmax_history": fmax_hist,
             "dt_history":   dt_hist,
         }
+   
+    def get_zmatrix(
+    self,
+    coords=None,
+    degrees=True,
+    verbose=False,
+    full_return=False,
+    ):
+        """
+        Construct a simple sequential Z-matrix assuming:
+
+            atom i bonded to i-1
+            atom i angle with i-2
+            atom i dihedral with i-3
+
+        Returns
+        -------
+        atoms : np.ndarray of shape (N,)
+            Atomic symbols in coordinate order.
+
+        zmat : np.ndarray of shape (N, 3)
+            Columns:
+                [bond_distance, bond_angle, dihedral]
+
+            Units:
+                bond_distance -> Å
+                angles/dihedrals -> degrees (or radians if degrees=False)
+
+        zmat_string : str
+            Human-readable Z-matrix string.
+        """
+
+        import numpy as np
+
+        # --------------------------------------------------------------- #
+        # Coordinates
+        # --------------------------------------------------------------- #
+        if coords is None:
+            coords = self.coords
+        N = self.N
+        #coords = np.asarray(coords, dtype=float)
+        #geom_shape = coords.shape
+
+        #if geom_shape[0] == 3.0*N:
+        coords = coords.reshape(-1, 3)
+        #elif geom_shape[1] == 3 and geom_shape[0] == N:
+        #    pass
+        #else:
+        #    if self.int_to_cart is not None:
+        #        coords = self.int_to_cart(coords.flatten())
+        #    else:
+        #        raise ValueError(
+        #            "Coordinates are not Nx3 Cartesian and no "
+        #            "int_to_cart conversion is available."
+        #        )
+
+        # --------------------------------------------------------------- #
+        # Geometry helper functions
+        # --------------------------------------------------------------- #
+        def bond_length(i, j):
+            return float(np.linalg.norm(coords[i] - coords[j]))
+
+        def bond_angle(i, j, k):
+            """
+            Angle i-j-k (vertex at j)
+            Returns radians.
+            """
+            u = coords[i] - coords[j]
+            v = coords[k] - coords[j]
+
+            nu = np.linalg.norm(u)
+            nv = np.linalg.norm(v)
+
+            if nu < 1e-12 or nv < 1e-12:
+                return 0.0
+
+            cos_theta = np.clip(
+                np.dot(u, v) / (nu * nv),
+                -1.0,
+                1.0
+            )
+
+            return float(np.arccos(cos_theta))
+
+        def dihedral_angle(i, j, k, l):
+            """
+            Dihedral angle i-j-k-l
+            Returns radians in [-pi, pi]
+            """
+
+            b1 = coords[j] - coords[i]
+            b2 = coords[k] - coords[j]
+            b3 = coords[l] - coords[k]
+
+            n1 = np.cross(b1, b2)
+            n2 = np.cross(b2, b3)
+
+            n1_norm = np.linalg.norm(n1)
+            n2_norm = np.linalg.norm(n2)
+
+            if n1_norm < 1e-12 or n2_norm < 1e-12:
+                return 0.0
+
+            n1 /= n1_norm
+            n2 /= n2_norm
+
+            b2_unit = b2 / (np.linalg.norm(b2) + 1e-30)
+
+            m1 = np.cross(n1, b2_unit)
+
+            x = np.dot(n1, n2)
+            y = np.dot(m1, n2)
+
+            return float(np.arctan2(y, x))
+
+        #to_deg = np.degrees if degrees else (lambda x: x)
+
+        # --------------------------------------------------------------- #
+        # Build Z-matrix array
+        # --------------------------------------------------------------- #
+        atoms = np.array(self.atoms)
+
+        zmat = np.zeros((N, 3), dtype=float)
+
+        for i in range(1,N):
+
+            # Bond distance
+            if i >= 1:
+                dq = coords[i,:] - coords[i - 1,:]
+                zmat[i, 0] = np.dot(dq,dq)**0.5 #bond_length(i, i - 1)
+                # Bond angle
+                if i >= 2:
+                    zmat[i, 1] = bond_angle(i, i - 1, i - 2)
+                    # Dihedral
+                    if i >= 3:
+                        zmat[i, 2] = dihedral_angle(
+                                i - 3,
+                                i - 2,
+                                i - 1,
+                                i
+                            )
+                
+
+        if full_return:
+            # --------------------------------------------------------------- #
+            # Human-readable string
+            # --------------------------------------------------------------- #
+            ang_unit = "deg" if degrees else "rad"
+
+            lines = [
+                f"# Z-matrix (angles in {ang_unit})",
+                f"# {'Atom':>4} {'Symbol':>6} "
+                f"{'Bond':>12} {'Angle':>12} {'Dihedral':>12}",
+            ]
+
+            for i in range(N):
+
+                lines.append(
+                    f"{i:>6} "
+                    f"{atoms[i]:>6} "
+                    f"{zmat[i,0]:>12.6f} "
+                    f"{zmat[i,1]:>12.6f} "
+                    f"{zmat[i,2]:>12.6f}"
+                )
+
+            zmat_string = "\n".join(lines)
+
+            if verbose:
+                print(zmat_string)
+            return atoms, zmat, zmat_string
+        else:
+            return zmat.flatten()
